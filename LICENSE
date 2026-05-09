@@ -1,0 +1,17 @@
+cyclebench-m4 is licensed under the GNU General Public License, version 2 or
+later (GPL-2.0-or-later).
+
+This is required because the project vendors `plugin/qemu-plugin.h` from the
+QEMU project (also GPL-2.0-or-later) and the `plugin/libinsn_count.so` shared
+object is built against that header to interoperate with QEMU's TCG plugin
+API.
+
+The full text of the GPL-2.0-or-later license is available at:
+    https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+
+Files vendored from upstream retain their original copyright headers:
+  - plugin/qemu-plugin.h  — Copyright (C) 2017-2019 Emilio G. Cota, Linaro
+
+All other files are:
+  Copyright (C) 2026 the cyclebench-m4 authors
+  SPDX-License-Identifier: GPL-2.0-or-later
