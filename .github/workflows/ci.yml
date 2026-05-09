@@ -67,11 +67,14 @@ jobs:
         run: brew install qemu
 
       - name: Probe QEMU plugin support; fall back to source build if needed
-        # Most Homebrew bottles of qemu are built with --enable-plugins, but
-        # if the bottle ever stops shipping them, build from source instead.
+        # Most Homebrew bottles of qemu are built with --enable-plugins. We
+        # set QEMU_SYSTEM/QEMU_USER explicitly because the Makefile defaults
+        # to ./qemu/build/* (which only exists after `make qemu`).
         run: |
           if qemu-system-arm -h 2>&1 | grep -q -- '-plugin'; then
               echo "Homebrew qemu-system-arm has --enable-plugins ✓"
+              echo "QEMU_SYSTEM=$(command -v qemu-system-arm)" >> "$GITHUB_ENV"
+              echo "QEMU_USER=$(command -v qemu-arm 2>/dev/null || true)" >> "$GITHUB_ENV"
           else
               echo "Homebrew qemu lacks plugins; building from source"
               brew install ninja glib pkg-config python@3.12
