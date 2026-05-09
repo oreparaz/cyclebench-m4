@@ -63,8 +63,10 @@ jobs:
         with:
           release: '13.2.Rel1'
 
-      - name: Install QEMU (Homebrew)
-        run: brew install qemu
+      - name: Install QEMU + plugin build deps (Homebrew)
+        # qemu pulls in glib already; pkg-config lets the plugin Makefile
+        # discover the glib headers that qemu-plugin.h includes.
+        run: brew install qemu pkg-config
 
       - name: Probe QEMU plugin support; fall back to source build if needed
         # Most Homebrew bottles of qemu are built with --enable-plugins. We

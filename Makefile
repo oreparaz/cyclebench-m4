@@ -117,7 +117,7 @@ $(QEMU_USER_LOCAL) $(QEMU_SYSTEM_LOCAL): | qemu/build/build.ninja
 
 qemu/build/build.ninja:
 	@if [ ! -d qemu/.git ]; then \
-	  git clone --depth 1 --branch v8.2.2 https://gitlab.com/qemu-project/qemu.git ; \
+	  git clone --depth 1 --branch v11.0.0 https://gitlab.com/qemu-project/qemu.git ; \
 	fi
 	@mkdir -p qemu/build
 	@cd qemu/build && ../configure \

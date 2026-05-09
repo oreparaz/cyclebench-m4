@@ -1,4 +1,4 @@
-# Build a tiny QEMU TCG plugin (libinsn_count.so) using QEMU 8.2's plugin API.
+# Build a tiny QEMU TCG plugin (libinsn_count.so) using QEMU 11.0's plugin API.
 #
 # We don't need any of QEMU's build system — the plugin is a standalone
 # shared object loaded via dlopen. The header (qemu-plugin.h) is
@@ -11,8 +11,12 @@
 
 UNAME_S := $(shell uname -s)
 
+# QEMU 9+ pulled glib into qemu-plugin.h. We don't use the GArray-returning
+# function ourselves, but the include forces us to find glib's headers.
+GLIB_CFLAGS := $(shell pkg-config --cflags glib-2.0 2>/dev/null)
+
 PLUGIN  := libinsn_count.so
-CFLAGS  := -O2 -fPIC -fvisibility=hidden -Wall -Wextra -I.
+CFLAGS  := -O2 -fPIC -fvisibility=hidden -Wall -Wextra -I. $(GLIB_CFLAGS)
 
 # QEMU resolves plugin API symbols at dlopen time, so the .so links with
 # undefined references. Apple ld64 rejects that by default; pass

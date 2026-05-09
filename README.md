@@ -100,7 +100,7 @@ insns retired: 863
 ### Worked example: SHA-256 cost on the supplied implementation
 
 Measured here on the bare-metal M4 path (`arm-none-eabi-gcc 13.3.1`,
-`-O2 -mthumb -mfpu=fpv4-sp-d16`, qemu-system-arm 8.2.2, mps2-an386):
+`-O2 -mthumb -mfpu=fpv4-sp-d16`, qemu-system-arm 11.0.0, mps2-an386):
 
 ```
 ITERS=0     baseline                                  863
@@ -131,10 +131,10 @@ absolute accuracy.
 | `m4/semihost.c`/`.h`          | ARM Semihosting `bm_write` / `bm_exit` (BKPT 0xab). |
 | `m4/link.ld`                  | Linker script for `mps2-an386`: code at 0x0, RAM at 0x20000000. |
 | `plugin/insn_count.c`         | QEMU TCG plugin: registers `INLINE_ADD_U64` per TB, prints total at exit. |
-| `plugin/qemu-plugin.h`        | Vendored from QEMU 8.2.2 upstream (header-only, GPL-2). |
-| `plugin/Makefile`             | Builds `libinsn_count.so` against the vendored header — no glib needed. |
+| `plugin/qemu-plugin.h`        | Vendored from QEMU 11.0.0 upstream (header-only, GPL-2). |
+| `plugin/Makefile`             | Builds `libinsn_count.so` against the vendored header (uses pkg-config to find glib, which qemu-plugin.h pulls in for `GArray`). |
 | `Makefile`                    | All build/run targets. |
-| `qemu/`                       | (Optional) QEMU 8.2.2 source clone, used only by `make qemu` on Linux. |
+| `qemu/`                       | (Optional) QEMU 11.0.0 source clone, used only by `make qemu` on Linux. |
 
 ## Inspecting the generated code
 
@@ -147,24 +147,35 @@ The disassembly is the most useful artifact when comparing two C variants:
 if you see the inner loop spilling to the stack, or the compiler choosing
 `UMULL` over `MUL`, that's where your cycles go.
 
-## How the plugin works (in 5 lines)
+## How the plugin works
 
 ```c
+sb         = qemu_plugin_scoreboard_new(sizeof(uint64_t));
+insn_count = qemu_plugin_scoreboard_u64(sb);
+
 qemu_plugin_register_vcpu_tb_trans_cb(id, on_tb_trans);
   └─ on_tb_trans:
-       qemu_plugin_register_vcpu_tb_exec_inline(
-           tb, QEMU_PLUGIN_INLINE_ADD_U64, &insn_count, n_insns);
+       qemu_plugin_register_vcpu_tb_exec_inline_per_vcpu(
+           tb, QEMU_PLUGIN_INLINE_ADD_U64, insn_count, n_insns);
+
+at exit:
+       fprintf(stderr, "insns retired: %lu\n",
+               qemu_plugin_u64_sum(insn_count));
 ```
 
-A translation-time callback fires when QEMU compiles a TB. We ask QEMU to
-emit an inline `*counter += n` op into the JITted host code. So per-TB
-overhead is one host memory add — that's why the count target runs at ~2
-billion guest instructions per second. At process exit, the plugin prints
-the counter to stderr.
+A translation-time callback fires when QEMU compiles a TB. The plugin asks
+QEMU to emit an inline `*counter += n` op into the JITted host code,
+backed by a per-vcpu scoreboard slot. So per-TB host-side overhead is one
+memory add — that's why the count target runs at ~2 billion guest
+instructions per second. At process exit, the plugin sums across vcpus
+and prints to stderr.
 
-We vendor `qemu-plugin.h` from QEMU 8.2.2 because Ubuntu's `qemu-user`
-package doesn't ship plugin headers, and it's a self-contained header
-file that compiles cleanly with `-fPIC -shared`.
+We vendor `qemu-plugin.h` from QEMU 11.0.0 because Ubuntu's `qemu-user`
+package doesn't ship plugin headers. The pre-9.0 inline-add API
+(`qemu_plugin_register_vcpu_tb_exec_inline`) was removed in QEMU 9.0;
+we use its successor (`_per_vcpu` + scoreboards). On Linux, `make qemu`
+clones and builds QEMU v11.0.0 to match the API; on macOS, Homebrew
+ships v11+.
 
 ## Why bare-metal vs userspace, and why the userspace path uses `-mcpu=cortex-a7`
 
