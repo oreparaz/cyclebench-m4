@@ -1,5 +1,7 @@
 # cyclebench-m4
 
+[![ci](https://github.com/oreparaz/cyclebench-m4/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/oreparaz/cyclebench-m4/actions/workflows/ci.yml)
+
 A small harness for estimating how many clock cycles a piece of pure C will
 take on a **Cortex-M4**. Cross-compiles for an architecturally-pure M4 ELF,
 runs it under `qemu-system-arm -M mps2-an386` (a real Cortex-M4 board model),

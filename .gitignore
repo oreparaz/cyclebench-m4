@@ -16,3 +16,4 @@ qemu/
 # editor / OS
 .DS_Store
 *.swp
+.claude/
