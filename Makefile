@@ -1,54 +1,71 @@
-# Cortex-M4 cycle-estimation harness
+# cyclebench-m4 — instruction counting for Cortex-M4 C code via QEMU.
 #
-# Targets:
-#   make              — build everything (host + ARM userspace)
-#   make host         — build a native x86 reference binary (for sanity)
-#   make bench        — build ARM userspace binary (qemu-arm runnable)
-#   make bench-m4     — build bare-metal Cortex-M4 .elf (no QEMU run target here)
-#   make count        — run under qemu-arm with libinsn TCG plugin (insns retired)
-#   make count-trace  — fallback: count via -d in_asm (slow, no plugin needed)
-#   make disasm       — dump Thumb-2 disassembly of the ARM build
-#   make sizes        — print per-section sizes (rough flash/RAM footprint)
-#   make clean
+# Two measurement paths, both using a small in-tree TCG plugin
+# (plugin/libinsn_count.so) that asks QEMU to emit an inline ADD_U64
+# per translated block:
+#
+#   make count          architecturally-pure: bare-metal Cortex-M4 .elf
+#                       on qemu-system-arm -M mps2-an386 (works on Linux
+#                       and macOS, both via brew/apt or a local QEMU build).
+#
+#   make count-linux    cross-check: ARM userspace ELF on qemu-arm.
+#                       Faster to iterate (no startup), Linux-only.
+#                       Uses -mcpu=cortex-a7 -mthumb because glibc startup
+#                       is A-profile and won't link against M-profile objects.
+#
+# Once-only setup:
+#   make qemu           builds local qemu-arm + qemu-system-arm with
+#                       --enable-plugins (Ubuntu's packages don't ship them).
 
 # ---- toolchains ----
 CC_HOST    ?= cc
 CC_ARM     ?= arm-linux-gnueabihf-gcc
-OBJDUMP    ?= arm-linux-gnueabihf-objdump
 SIZE       ?= arm-linux-gnueabihf-size
+OBJDUMP    ?= arm-linux-gnueabihf-objdump
 CC_M4      ?= arm-none-eabi-gcc
-OBJDUMP_M4 ?= arm-none-eabi-objdump
 SIZE_M4    ?= arm-none-eabi-size
+OBJDUMP_M4 ?= arm-none-eabi-objdump
 
-QEMU       ?= qemu-arm
+# Default to the locally-built plugin-enabled QEMU (produced by `make qemu`).
+# Override with environment variables on systems where qemu has plugins
+# baked into the distro package, e.g. macOS Homebrew:
+#   QEMU_SYSTEM=qemu-system-arm make count
+QEMU_USER_LOCAL   := qemu/build/qemu-arm
+QEMU_SYSTEM_LOCAL := qemu/build/qemu-system-arm
+QEMU_USER         ?= $(QEMU_USER_LOCAL)
+QEMU_SYSTEM       ?= $(QEMU_SYSTEM_LOCAL)
 
 # ---- flags ----
-# We approximate Cortex-M4 ISA in userspace with armv7e-m via -mcpu=cortex-m4
-# + -mthumb. arm-linux-gnueabihf's glibc startup is ARM-mode; if your toolchain
-# rejects -mcpu=cortex-m4 for a fully-linked binary, fall back to ARMFLAGS_FALLBACK.
-# The instruction mix is what matters for cycle estimation, and Thumb-2 + FPv4-SP
-# matches what an M4 actually executes.
+CFLAGS_COMMON  = -O2 -g -Wall -Wextra -fno-builtin -fno-stack-protector
+
+# Userspace ARM build: tune for M4 if the linker accepts it (it usually
+# won't because glibc startup is A-profile), otherwise fall back to A7
+# which has the same Thumb-2 + FPv4-SP-d16 instruction set.
 ARMFLAGS          = -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb
-ARMFLAGS_FALLBACK = -mcpu=cortex-a7  -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb
-CFLAGS_COMMON     = -O2 -g -Wall -Wextra -fno-builtin -fno-stack-protector
+ARMFLAGS_FALLBACK = -mcpu=cortex-a7 -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb
 
-# Bare-metal M4 uses -specs=nosys.specs so we link without a real OS.
-M4FLAGS = -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb \
-          -O2 -g -Wall -Wextra -ffreestanding -specs=nosys.specs
+# Bare-metal Cortex-M4: the architecturally-pure path.
+M4FLAGS = -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard \
+          -ffreestanding -nostartfiles -O2 -g -Wall -Wextra \
+          -DBAREMETAL -I.
+M4LDFLAGS = -T m4/link.ld -Wl,--gc-sections -Wl,--build-id=none
 
-SRCS = bench.c sha256.c
+ITERS   ?= 1000
+MSG_LEN ?= 64
+
+SRCS    = bench.c sha256.c
+M4_SRCS = $(SRCS) m4/startup.c m4/semihost.c
+
+INSN_PLUGIN := plugin/libinsn_count.so
 
 # ---- default ----
 .PHONY: all
-all: host bench
+all: bench-host bench bench-m4.elf $(INSN_PLUGIN)
 
-# ---- host reference build (correctness sanity) ----
-.PHONY: host
-host: bench-host
+# ---- builds ----
 bench-host: $(SRCS) sha256.h
 	$(CC_HOST) $(CFLAGS_COMMON) -o $@ $(SRCS)
 
-# ---- ARM userspace build (qemu-arm runnable) ----
 bench: $(SRCS) sha256.h
 	@echo "  CC[arm-userspace]  $@"
 	@$(CC_ARM) $(ARMFLAGS) $(CFLAGS_COMMON) -static -o $@ $(SRCS) 2>/tmp/cortex-cc.log \
@@ -56,84 +73,86 @@ bench: $(SRCS) sha256.h
 	         $(CC_ARM) $(ARMFLAGS_FALLBACK) $(CFLAGS_COMMON) -static -o $@ $(SRCS) )
 	@$(SIZE) $@ || true
 
-# ---- bare-metal Cortex-M4 build (proper M4 ISA, no Linux) ----
-bench-m4.elf: $(SRCS) sha256.h
-	$(CC_M4) $(M4FLAGS) -o $@ $(SRCS)
-	$(SIZE_M4) $@
-
-.PHONY: bench-m4
-bench-m4: bench-m4.elf
-
-# ---- instruction counting ----
-# Two paths:
-#   make count        — stock qemu-arm + -d exec trace, streamed through grep.
-#                       Works with any qemu but is slow (~1µs/insn host time).
-#                       Good for ITERS up to a few thousand.
-#   make count-fast   — uses ./qemu/build/qemu-arm built with --enable-plugins
-#                       and our libinsn_count.so. ~30× faster, scales to 1e9 insns.
-#                       Run `make qemu` once to produce that binary.
-
-ITERS   ?= 1000
-MSG_LEN ?= 64
-INSN_PLUGIN := plugin/libinsn_count.so
+# bench-m4.elf bakes ITERS/MSG_LEN in at compile time (no argv on bare-metal),
+# so we force-rebuild on every invocation — the build is sub-second.
+.PHONY: bench-m4.elf
+bench-m4.elf: $(M4_SRCS) sha256.h m4/semihost.h m4/link.ld
+	@echo "  CC[m4-bare]  $@  (ITERS=$(ITERS) MSG_LEN=$(MSG_LEN))"
+	@$(CC_M4) $(M4FLAGS) -DBENCH_ITERS=$(ITERS) -DBENCH_MSGLEN=$(MSG_LEN) \
+	    $(M4LDFLAGS) -o $@ $(M4_SRCS)
+	@$(SIZE_M4) $@
 
 $(INSN_PLUGIN): plugin/insn_count.c plugin/qemu-plugin.h plugin/Makefile
 	$(MAKE) -C plugin
 
-# -- stock-qemu trace counter --
+# ---- bare-metal cycle count (the recommended path) ----
 .PHONY: count
-count: bench bench-host
-	@echo "  RUN(trace)  $(QEMU) -one-insn-per-tb ./bench $(ITERS) $(MSG_LEN)"
-	@$(QEMU) ./bench $(ITERS) $(MSG_LEN) > /tmp/cortex-digest.txt 2>/dev/null \
-	 ; ./bench-host $(ITERS) $(MSG_LEN) > /tmp/cortex-digest-host.txt \
-	 ; cmp -s /tmp/cortex-digest.txt /tmp/cortex-digest-host.txt && echo "  digest OK (host == arm)" || echo "  WARN: digest mismatch"
-	@$(QEMU) -one-insn-per-tb -d nochain,exec ./bench $(ITERS) $(MSG_LEN) 2>&1 >/dev/null \
-	  | awk '/^Trace /{n++} END{printf "insns retired: %d\n", n}'
+count: bench-m4.elf $(INSN_PLUGIN)
+	@echo "  RUN  $(QEMU_SYSTEM) -M mps2-an386 -kernel bench-m4.elf"
+	@$(QEMU_SYSTEM) -M mps2-an386 -nographic -no-reboot \
+	    -semihosting-config enable=on,target=native \
+	    -plugin ./$(INSN_PLUGIN) -d plugin \
+	    -kernel bench-m4.elf 2>&1 \
+	    | grep -E '^[0-9a-f]{64}|^insns retired'
 
-# -- plugin-enabled qemu (built locally) --
-QEMU_LOCAL := qemu/build/qemu-arm
+# ---- userspace Linux cross-check (Linux-only) ----
+.PHONY: count-linux
+count-linux: bench bench-host $(INSN_PLUGIN)
+	@echo "  RUN  $(QEMU_USER) ./bench $(ITERS) $(MSG_LEN)"
+	@$(QEMU_USER) ./bench $(ITERS) $(MSG_LEN)         > /tmp/d-arm.txt
+	@./bench-host $(ITERS) $(MSG_LEN)                 > /tmp/d-host.txt
+	@cmp -s /tmp/d-arm.txt /tmp/d-host.txt && echo "  digest OK (host == arm)" \
+	    || ( echo "  WARN: digest mismatch"; diff /tmp/d-arm.txt /tmp/d-host.txt )
+	@$(QEMU_USER) -plugin ./$(INSN_PLUGIN) -d plugin ./bench $(ITERS) $(MSG_LEN) \
+	    | grep -E '^insns retired' || true
 
-.PHONY: count-fast
-count-fast: bench $(INSN_PLUGIN) $(QEMU_LOCAL)
-	@echo "  PLUGIN  $(INSN_PLUGIN)"
-	@echo "  RUN     $(QEMU_LOCAL) ./bench $(ITERS) $(MSG_LEN)"
-	@$(QEMU_LOCAL) -plugin ./$(INSN_PLUGIN) -d plugin ./bench $(ITERS) $(MSG_LEN)
-
-# One-shot build of a minimal plugin-enabled qemu-arm. ~3-5 minutes.
+# ---- one-shot build of plugin-enabled qemu-arm + qemu-system-arm ----
+# Only needed on Linux (Ubuntu's qemu packages aren't built --enable-plugins).
+# macOS Homebrew's qemu already has plugins, so this target is unused there.
 .PHONY: qemu
-qemu: $(QEMU_LOCAL)
+qemu: $(QEMU_USER_LOCAL) $(QEMU_SYSTEM_LOCAL)
 
-$(QEMU_LOCAL):
-	@if [ ! -d qemu ]; then \
+$(QEMU_USER_LOCAL) $(QEMU_SYSTEM_LOCAL): | qemu/build/build.ninja
+	@cd qemu/build && $(MAKE) -j$$(nproc) qemu-arm qemu-system-arm
+
+qemu/build/build.ninja:
+	@if [ ! -d qemu/.git ]; then \
 	  git clone --depth 1 --branch v8.2.2 https://gitlab.com/qemu-project/qemu.git ; \
 	fi
-	cd qemu && ./configure \
-	    --target-list=arm-linux-user \
+	@mkdir -p qemu/build
+	@cd qemu/build && ../configure \
+	    --target-list=arm-linux-user,arm-softmmu \
 	    --enable-plugins \
-	    --disable-system --disable-tools --disable-docs \
-	    --disable-werror --static \
-	    && $(MAKE) -j$$(nproc) qemu-arm
-
-# ---- plugin-free fallback ----
-# -d in_asm logs every translated block; with -singlestep that's one block per
-# instruction, so wc -l on lines starting with 0x gives a count. Slow but works.
-.PHONY: count-trace
-count-trace: bench
-	@echo "  RUN(trace)  $(QEMU) -singlestep -d in_asm ./bench $(ITERS) $(MSG_LEN)"
-	@$(QEMU) -singlestep -d in_asm,nochain ./bench $(ITERS) $(MSG_LEN) 2> /tmp/cortex-trace.log >/dev/null
-	@printf "instructions retired (approx): "
-	@grep -c '^0x' /tmp/cortex-trace.log
+	    --disable-tools --disable-docs --disable-werror
 
 # ---- inspection ----
 .PHONY: disasm
-disasm: bench
-	$(OBJDUMP) -d -S --no-show-raw-insn bench | sed -n '/<sha256_compress>:/,/^$$/p'
+disasm: bench-m4.elf
+	@$(OBJDUMP_M4) -d --no-show-raw-insn bench-m4.elf \
+	    | sed -n '/<sha256_compress>:/,/^$$/p'
 
 .PHONY: sizes
-sizes: bench
-	$(SIZE) -A bench
+sizes: bench-m4.elf
+	@$(SIZE_M4) -A bench-m4.elf
+
+# ---- a small built-in self-test for CI ----
+.PHONY: test
+test: count
+	@$(CC_HOST) $(CFLAGS_COMMON) -o bench-host $(SRCS)
+	@./bench-host $(ITERS) $(MSG_LEN) > /tmp/d-host.txt
+	@$(QEMU_SYSTEM) -M mps2-an386 -nographic -no-reboot \
+	    -semihosting-config enable=on,target=native \
+	    -kernel bench-m4.elf 2>&1 | sed -n '1p' > /tmp/d-m4.txt
+	@cmp -s /tmp/d-host.txt /tmp/d-m4.txt && echo "  OK: m4 digest == host digest" \
+	    || ( echo "  FAIL: digest mismatch"; diff /tmp/d-host.txt /tmp/d-m4.txt; exit 1 )
 
 # ---- housekeeping ----
 .PHONY: clean
 clean:
-	rm -f bench bench-host bench-m4.elf /tmp/cortex-trace.log /tmp/cortex-cc.log
+	rm -f bench bench-host bench-m4.elf bench-m4.map
+	rm -f /tmp/cortex-cc.log /tmp/d-arm.txt /tmp/d-host.txt /tmp/d-m4.txt
+	$(MAKE) -C plugin clean
+
+.PHONY: distclean
+distclean: clean
+	rm -rf qemu
