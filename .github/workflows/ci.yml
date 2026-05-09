@@ -27,16 +27,20 @@ jobs:
         run: make qemu
 
       - name: Cortex-M4 cycle count — bare-metal path
+        # set -o pipefail catches make failures inside $(make ... | awk ...).
+        # First do a verbose run so any toolchain failure shows up in logs.
         run: |
-          set -e
-          # Baseline: empty loop, just startup + exit.
-          BASE=$(make -s count ITERS=0 2>&1 | awk '/insns retired/{print $3}')
-          A=$(make -s count ITERS=1000  MSG_LEN=64 2>&1 | awk '/insns retired/{print $3}')
-          B=$(make -s count ITERS=11000 MSG_LEN=64 2>&1 | awk '/insns retired/{print $3}')
+          set -eo pipefail
+          echo "=== verbose first run (so any error shows in the log) ==="
+          make count ITERS=1000 MSG_LEN=64
+          echo "=== sweep ==="
+          BASE=$(make -s count ITERS=0      2>&1 | awk '/insns retired/{print $3}')
+          A=$(   make -s count ITERS=1000   2>&1 | awk '/insns retired/{print $3}')
+          B=$(   make -s count ITERS=11000  2>&1 | awk '/insns retired/{print $3}')
           per_iter=$(( (B - A) / 10000 ))
-          echo "baseline (ITERS=0):                    $BASE insns"
-          echo "ITERS=1000  MSG_LEN=64 total insns:    $A"
-          echo "ITERS=11000 MSG_LEN=64 total insns:    $B"
+          echo "baseline (ITERS=0):                     $BASE insns"
+          echo "ITERS=1000  MSG_LEN=64 total insns:     $A"
+          echo "ITERS=11000 MSG_LEN=64 total insns:     $B"
           echo "per-iter SHA-256(64B) on bare-metal M4: $per_iter"
           # Naive pure-C SHA-256 at -O2 should land in this band.
           [ "$per_iter" -ge 5000 ] && [ "$per_iter" -le 9000 ] \
