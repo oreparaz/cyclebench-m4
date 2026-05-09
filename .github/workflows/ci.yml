@@ -82,20 +82,24 @@ jobs:
 
       - name: Cortex-M4 cycle count — bare-metal path
         run: |
-          set -e
-          BASE=$(make -s count ITERS=0 2>&1 | awk '/insns retired/{print $3}')
-          A=$(make -s count ITERS=1000  MSG_LEN=64 2>&1 | awk '/insns retired/{print $3}')
-          B=$(make -s count ITERS=11000 MSG_LEN=64 2>&1 | awk '/insns retired/{print $3}')
+          set -eo pipefail
+          echo "=== verbose first run (so any error shows in the log) ==="
+          make count ITERS=1000 MSG_LEN=64
+          echo "=== sweep ==="
+          BASE=$(make -s count ITERS=0     2>&1 | awk '/insns retired/{print $3}')
+          A=$(   make -s count ITERS=1000  2>&1 | awk '/insns retired/{print $3}')
+          B=$(   make -s count ITERS=11000 2>&1 | awk '/insns retired/{print $3}')
           per_iter=$(( (B - A) / 10000 ))
-          echo "baseline (ITERS=0):                    $BASE insns"
-          echo "ITERS=1000  MSG_LEN=64 total insns:    $A"
-          echo "ITERS=11000 MSG_LEN=64 total insns:    $B"
+          echo "baseline (ITERS=0):                     $BASE insns"
+          echo "ITERS=1000  MSG_LEN=64 total insns:     $A"
+          echo "ITERS=11000 MSG_LEN=64 total insns:     $B"
           echo "per-iter SHA-256(64B) on bare-metal M4: $per_iter"
           [ "$per_iter" -ge 5000 ] && [ "$per_iter" -le 9000 ] \
               || { echo "FAIL: per-iter out of expected range"; exit 1; }
 
       - name: Verify digest matches host
         run: |
+          set -eo pipefail
           cc -O2 -o bench-host bench.c sha256.c
           ./bench-host 1000 64 > /tmp/d-host.txt
           make -s count ITERS=1000 MSG_LEN=64 2>&1 | grep -E '^[0-9a-f]{64}$' > /tmp/d-m4.txt
