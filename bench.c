@@ -32,7 +32,7 @@
 static uint8_t g_msg[MAX_MSG_LEN];
 
 static void emit_digest(const uint8_t *d, size_t n) {
-    static const char hex[16] = "0123456789abcdef";
+    static const char hex[] = "0123456789abcdef";
     char buf[2 * SHA256_DIGEST_SIZE + 1];
     for (size_t i = 0; i < n; i++) {
         buf[2 * i]     = hex[d[i] >> 4];

@@ -1,12 +1,13 @@
-# cyclebench-m4 — instruction counting for Cortex-M4 C code via QEMU.
+# cyclebench-m4 — instruction and estimated-cycle counting for Cortex-M4.
 #
-# Two measurement paths, both using a small in-tree TCG plugin
-# (plugin/libinsn_count.so) that asks QEMU to emit an inline ADD_U64
-# per translated block:
+# Three measurement paths, using two small in-tree TCG plugins:
 #
 #   make count          architecturally-pure: bare-metal Cortex-M4 .elf
 #                       on qemu-system-arm -M mps2-an386 (works on Linux
 #                       and macOS, both via brew/apt or a local QEMU build).
+#
+#   make count-cycles   same execution path, with a pessimistic Cortex-M4
+#                       timing-table estimate and category breakdown.
 #
 #   make count-linux    cross-check: ARM userspace ELF on qemu-arm.
 #                       Faster to iterate (no startup), Linux-only.
@@ -15,7 +16,7 @@
 #
 # Once-only setup:
 #   make qemu           builds local qemu-arm + qemu-system-arm with
-#                       --enable-plugins (Ubuntu's packages don't ship them).
+#                       --enable-plugins and Capstone disassembly support.
 
 # ---- toolchains ----
 CC_HOST    ?= cc
@@ -57,10 +58,11 @@ SRCS    = bench.c sha256.c
 M4_SRCS = $(SRCS) m4/startup.c m4/semihost.c
 
 INSN_PLUGIN := plugin/libinsn_count.so
+CYCLE_PLUGIN := plugin/libm4_cycles.so
 
 # ---- default ----
 .PHONY: all
-all: bench-host bench bench-m4.elf $(INSN_PLUGIN)
+all: bench-host bench bench-m4.elf $(INSN_PLUGIN) $(CYCLE_PLUGIN)
 
 # ---- builds ----
 bench-host: $(SRCS) sha256.h
@@ -85,7 +87,11 @@ bench-m4.elf: $(M4_SRCS) sha256.h m4/semihost.h m4/link.ld
 $(INSN_PLUGIN): plugin/insn_count.c plugin/qemu-plugin.h plugin/Makefile
 	$(MAKE) -C plugin
 
-# ---- bare-metal cycle count (the recommended path) ----
+$(CYCLE_PLUGIN): plugin/m4_cycles.c plugin/m4_timing.c plugin/m4_timing.h \
+                 plugin/qemu-plugin.h plugin/Makefile
+	$(MAKE) -C plugin
+
+# ---- bare-metal instruction count ----
 .PHONY: count
 count: bench-m4.elf $(INSN_PLUGIN)
 	@echo "  RUN  $(QEMU_SYSTEM) -M mps2-an386 -kernel bench-m4.elf"
@@ -94,6 +100,23 @@ count: bench-m4.elf $(INSN_PLUGIN)
 	    -plugin ./$(INSN_PLUGIN) -d plugin \
 	    -kernel bench-m4.elf 2>&1 \
 	    | grep -E '^[0-9a-f]{64}|^insns retired'
+
+# ---- pessimistic zero-wait-state Cortex-M4 cycle estimate ----
+.PHONY: count-cycles
+count-cycles: bench-m4.elf $(CYCLE_PLUGIN)
+	@echo "  RUN  $(QEMU_SYSTEM) -M mps2-an386 -kernel bench-m4.elf"
+	@tmp=$$(mktemp); \
+	$(QEMU_SYSTEM) -M mps2-an386 -nographic -no-reboot \
+	    -semihosting-config enable=on,target=native \
+	    -plugin ./$(CYCLE_PLUGIN) -d plugin \
+	    -kernel bench-m4.elf >$$tmp 2>&1 || true; \
+	grep -E '^[0-9a-f]{64}|^insns executed|^m4 pessimistic core cycles|^  ' $$tmp; \
+	if ! grep -q '^  undecoded instructions: 0$$' $$tmp; then \
+	    echo "ERROR: no complete decoded timing report; QEMU needs plugin and Capstone support"; \
+	    cat $$tmp; \
+	    rm -f $$tmp; exit 1; \
+	fi; \
+	rm -f $$tmp
 
 # ---- userspace Linux cross-check (Linux-only) ----
 .PHONY: count-linux
@@ -123,6 +146,7 @@ qemu/build/build.ninja:
 	@cd qemu/build && ../configure \
 	    --target-list=arm-linux-user,arm-softmmu \
 	    --enable-plugins \
+	    --enable-capstone \
 	    --disable-tools --disable-docs --disable-werror
 
 # ---- inspection ----
@@ -137,7 +161,8 @@ sizes: bench-m4.elf
 
 # ---- a small built-in self-test for CI ----
 .PHONY: test
-test: count
+test: count count-cycles
+	@$(MAKE) -C plugin test
 	@$(CC_HOST) $(CFLAGS_COMMON) -o bench-host $(SRCS)
 	@./bench-host $(ITERS) $(MSG_LEN) > /tmp/d-host.txt
 	@$(QEMU_SYSTEM) -M mps2-an386 -nographic -no-reboot \

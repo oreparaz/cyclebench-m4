@@ -19,7 +19,7 @@ jobs:
           sudo apt-get install -y \
               gcc-arm-none-eabi binutils-arm-none-eabi \
               gcc-arm-linux-gnueabihf \
-              libglib2.0-dev ninja-build pkg-config python3-venv
+              libcapstone-dev libglib2.0-dev ninja-build pkg-config python3-venv
 
       - name: Build plugin-enabled qemu-arm + qemu-system-arm
         # Ubuntu's distro qemu is built without --enable-plugins, so we
@@ -31,6 +31,7 @@ jobs:
         # First do a verbose run so any toolchain failure shows up in logs.
         run: |
           set -eo pipefail
+          make -C plugin test
           echo "=== verbose first run (so any error shows in the log) ==="
           make count ITERS=1000 MSG_LEN=64
           echo "=== sweep ==="
@@ -45,6 +46,12 @@ jobs:
           # Naive pure-C SHA-256 at -O2 should land in this band.
           [ "$per_iter" -ge 5000 ] && [ "$per_iter" -le 9000 ] \
               || { echo "FAIL: per-iter out of expected range"; exit 1; }
+          C=$(make -s count-cycles ITERS=1000  2>&1 | awk '/m4 pessimistic core cycles/{print $5}')
+          D=$(make -s count-cycles ITERS=11000 2>&1 | awk '/m4 pessimistic core cycles/{print $5}')
+          per_iter_cycles=$(( (D - C) / 10000 ))
+          echo "per-iter pessimistic M4 cycles:           $per_iter_cycles"
+          [ "$per_iter_cycles" -ge 8000 ] && [ "$per_iter_cycles" -le 12000 ] \
+              || { echo "FAIL: cycle estimate out of expected range"; exit 1; }
 
       - name: Userspace Linux cross-check
         # Compares digest between the host build and the ARM userspace build,
@@ -66,7 +73,7 @@ jobs:
       - name: Install QEMU + plugin build deps (Homebrew)
         # qemu pulls in glib already; pkg-config lets the plugin Makefile
         # discover the glib headers that qemu-plugin.h includes.
-        run: brew install qemu pkg-config
+        run: brew install qemu capstone pkg-config
 
       - name: Probe QEMU plugin support; fall back to source build if needed
         # Most Homebrew bottles of qemu are built with --enable-plugins. We
@@ -79,7 +86,7 @@ jobs:
               echo "QEMU_USER=$(command -v qemu-arm 2>/dev/null || true)" >> "$GITHUB_ENV"
           else
               echo "Homebrew qemu lacks plugins; building from source"
-              brew install ninja glib pkg-config python@3.12
+              brew install ninja glib capstone pkg-config python@3.12
               make qemu
               echo "QEMU_SYSTEM=$PWD/qemu/build/qemu-system-arm" >> "$GITHUB_ENV"
               echo "QEMU_USER=$PWD/qemu/build/qemu-arm"          >> "$GITHUB_ENV"
@@ -88,6 +95,7 @@ jobs:
       - name: Cortex-M4 cycle count — bare-metal path
         run: |
           set -eo pipefail
+          make -C plugin test
           echo "=== verbose first run (so any error shows in the log) ==="
           make count ITERS=1000 MSG_LEN=64
           echo "=== sweep ==="
@@ -101,6 +109,12 @@ jobs:
           echo "per-iter SHA-256(64B) on bare-metal M4: $per_iter"
           [ "$per_iter" -ge 5000 ] && [ "$per_iter" -le 9000 ] \
               || { echo "FAIL: per-iter out of expected range"; exit 1; }
+          C=$(make -s count-cycles ITERS=1000  2>&1 | awk '/m4 pessimistic core cycles/{print $5}')
+          D=$(make -s count-cycles ITERS=11000 2>&1 | awk '/m4 pessimistic core cycles/{print $5}')
+          per_iter_cycles=$(( (D - C) / 10000 ))
+          echo "per-iter pessimistic M4 cycles:           $per_iter_cycles"
+          [ "$per_iter_cycles" -ge 8000 ] && [ "$per_iter_cycles" -le 12000 ] \
+              || { echo "FAIL: cycle estimate out of expected range"; exit 1; }
 
       - name: Verify digest matches host
         run: |

@@ -3,47 +3,61 @@
 [![ci](https://github.com/oreparaz/cyclebench-m4/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/oreparaz/cyclebench-m4/actions/workflows/ci.yml)
 
 A small harness for estimating how many clock cycles a piece of pure C will
-take on a **Cortex-M4**. Cross-compiles for an architecturally-pure M4 ELF,
-runs it under `qemu-system-arm -M mps2-an386` (a real Cortex-M4 board model),
-and counts retired instructions via a tiny TCG plugin. Comes with a SHA-256
-reference workload as a worked example.
+take on a **Cortex-M4**. It cross-compiles an architecturally-pure M4 ELF and
+runs it under `qemu-system-arm -M mps2-an386`. One TCG plugin counts executed
+instructions; a second applies a pessimistic zero-wait-state Cortex-M4 timing
+model. Comes with a SHA-256 reference workload as a worked example.
 
-Two measurement paths, both producing comparable numbers:
+Three measurement paths:
 
 | Path | Toolchain | Run target | What it gives you |
 |---|---|---|---|
-| **`make count`** (recommended) | `arm-none-eabi-gcc -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16` | `qemu-system-arm -M mps2-an386` | Architecturally-pure M4 ISA. Works on Linux & macOS. |
+| `make count` | `arm-none-eabi-gcc -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16` | `qemu-system-arm -M mps2-an386` | Executed-instruction baseline. |
+| **`make count-cycles`** (recommended for timing) | same | same | Pessimistic zero-wait-state Cortex-M4 cycle estimate and breakdown. |
 | `make count-linux` (cross-check) | `arm-linux-gnueabihf-gcc -mcpu=cortex-a7 -mthumb -mfpu=fpv4-sp-d16` | `qemu-arm` (user-mode) | Same Thumb-2 / FPv4-SP instruction set; faster turnaround; Linux only. |
 
-Both paths use the same in-tree TCG plugin (`plugin/libinsn_count.so`, ~50
-lines) which asks QEMU to emit an inline `ADD_U64` per translated block —
-counting is essentially free in the JITted host code. ~2 billion guest
-instructions per second.
+`count` uses `plugin/libinsn_count.so`, which emits one inline addition per
+translated block. `count-cycles` uses `plugin/libm4_cycles.so`, which decodes
+each instruction and emits per-instruction additions for the relevant timing
+categories.
 
 ## What this measures (and what it doesn't)
 
-QEMU reports **instructions retired**, not real M4 cycles. Most Thumb-2 ALU
-ops retire in 1 cycle on M4, so retired-insn count is a very tight lower
-bound on cycles, but it ignores:
+QEMU itself is not cycle accurate. `make count` reports instructions executed,
+which is a useful baseline but ignores multi-cycle behavior:
 
 | Source of extra cycles    | Typical M4 cost |
 |---|---|
-| Taken branch              | 1–3 cycles (pipeline refill) |
+| Taken branch              | 1 + P = 2–4 cycles |
 | `LDR` / `STR` (single)    | 2 cycles (1 if pipelined with next) |
 | `LDM` / `STM` of N regs   | 1 + N cycles |
 | `MUL` / `MLA`             | 1 cycle |
-| `UMULL` / `SMULL`         | 3–5 cycles |
+| `UMULL` / `SMULL`         | 1 cycle |
 | `SDIV` / `UDIV`           | 2–12 cycles (data-dependent) |
 | FP single `VADD/VMUL`     | 1 cycle |
 | `VDIV.F32` / `VSQRT.F32`  | 14 cycles |
 | Flash wait states         | depends on MCU + cache config |
 
-Treat the count as a tight lower bound on real cycles. It's excellent for
-**comparing** two C implementations — if A retires 30% fewer instructions
-than B, A is almost certainly faster on silicon. For absolute cycle numbers,
-use the DWT cycle counter on real hardware, a cycle-accurate sim (Renode,
-Keil µVision, ARM Fast Models), or weight the instruction mix using the
-table above.
+`make count-cycles` follows the timing tables in the
+[Cortex-M4 Technical Reference Manual](https://documentation-service.arm.com/static/5fce431be167456a35b36ade):
+
+- `SDIV`/`UDIV` always take their worst documented latency of 12 cycles.
+- Taken branches use the worst pipeline refill, `P=3`; untaken conditional
+  branches remain one cycle. Branch direction comes from the executed path.
+- Single loads/stores are charged two cycles. This deliberately does not claim
+  the one-cycle reduction possible for favorable adjacent memory operations.
+- Multi-register and floating-point instructions use their documented maximum
+  core costs. Immediate FP consumers are assumed where that increases latency.
+- Other decoded integer and DSP instructions are charged their documented
+  single cycle; unlike real pairing, these per-instruction maxima are additive.
+- Instructions such as `WFI`, `WFE`, barriers, and semihosting `BKPT` that have
+  no finite instruction-only bound are reported separately.
+
+This is a deterministic, pessimistic estimate for the path QEMU executes. It
+is not a formal WCET bound over every possible input, and it excludes flash,
+SRAM, peripheral, and bus wait states. The MPS2 code region named `FLASH` in
+the linker script is actually modeled as ZBT SRAM. For a specific MCU, use
+its DWT cycle counter to calibrate or replace this estimate.
 
 ## Setup
 
@@ -53,15 +67,15 @@ table above.
 sudo apt-get install -y \
     gcc-arm-none-eabi binutils-arm-none-eabi \
     gcc-arm-linux-gnueabihf \
-    libglib2.0-dev ninja-build pkg-config python3-venv
-make qemu        # ~30s — builds qemu-arm + qemu-system-arm with --enable-plugins
+    libcapstone-dev libglib2.0-dev ninja-build pkg-config python3-venv
+make qemu        # builds QEMU with plugin and Capstone disassembly support
 ```
 
 ### macOS
 
 ```bash
 brew install --cask gcc-arm-embedded   # arm-none-eabi-*
-brew install qemu                       # qemu-system-arm with plugins enabled
+brew install qemu capstone              # QEMU plugins + instruction decoding
 ```
 
 (The macOS path uses Homebrew's QEMU, which ships with `--enable-plugins`,
@@ -79,6 +93,7 @@ plugin-enabled pair locally. Builds in ~30s, only the
 ```bash
 make             # build host (sanity) + ARM userspace + bare-metal M4 + plugin
 make count       # → "insns retired: N" using the bare-metal M4 path
+make count-cycles # → cycle estimate plus category breakdown
 make count ITERS=10000 MSG_LEN=1024
 ```
 
@@ -89,6 +104,10 @@ nulls out program startup, `_exit`, and the SHA-256 finalise:
 make count ITERS=1000   # → N1
 make count ITERS=11000  # → N2
 # per-iter ≈ (N2 - N1) / 10000
+
+make count-cycles ITERS=1000   # → C1
+make count-cycles ITERS=11000  # → C2
+# per-iter cycle estimate ≈ (C2 - C1) / 10000
 ```
 
 `ITERS=0` runs only program startup (FPU enable, .bss zero, exit) — that's
@@ -104,24 +123,25 @@ insns retired: 863
 Measured here on the bare-metal M4 path (`arm-none-eabi-gcc 13.3.1`,
 `-O2 -mthumb -mfpu=fpv4-sp-d16`, qemu-system-arm 11.0.0, mps2-an386):
 
-```
-ITERS=0     baseline                                  863
-ITERS=1000  msg_len=64    total = 7,145,346    per-iter ≈ 7,144
-ITERS=11000 msg_len=64    total = 78,525,346   per-iter ≈ 7,138
-```
+| Method | ITERS=1,000 | ITERS=11,000 | Per iteration |
+|---|---:|---:|---:|
+| instruction count | 7,145,346 | 78,525,346 | 7,138 |
+| pessimistic M4 cycles | 9,654,431 | 106,034,431 | 9,638 |
 
-Per-iteration: **7,138 instructions per `sha256(64-byte buffer)`** on real
-Cortex-M4 ISA, which decomposes as ~3,569 instructions per 64-byte SHA-256
-compress block (each call processes 1 message block + 1 padding block).
-Matches published numbers for naive C SHA-256 on M4 (~3,500–6,000
-cycles/block on real silicon).
+The 2,500-cycle difference per iteration consists of 1,606 memory-operation
+cycles and 894 taken-branch/pipeline-refill cycles. This SHA-256 binary contains
+no divide or floating-point instructions, so those categories are zero.
+
+Per-iteration: **7,138 instructions** or **9,638 pessimistic zero-wait-state
+core cycles** per `sha256(64-byte buffer)`. Each call processes one message
+block plus one padding block.
 
 The userspace cross-check path gives ~6,754 insns per call — about 5%
 lower than bare-metal due to different scheduling tuning (`cortex-a7` vs
 `cortex-m4`) and a slightly leaner libc-side syscall surface. Use the
-bare-metal number as the authoritative one for "how many cycles on a real
-M4"; use the userspace number for fast iteration when you don't need
-absolute accuracy.
+bare-metal path when the exact M4 instruction stream matters; use the
+userspace number for fast comparative iteration. Neither instruction count
+alone is an authoritative real-hardware cycle measurement.
 
 ## Files
 
@@ -132,9 +152,12 @@ absolute accuracy.
 | `m4/startup.c`                | Cortex-M4 vector table + Reset_Handler. Enables CP10/CP11 (FPU) before main. |
 | `m4/semihost.c`/`.h`          | ARM Semihosting `bm_write` / `bm_exit` (BKPT 0xab). |
 | `m4/link.ld`                  | Linker script for `mps2-an386`: code at 0x0, RAM at 0x20000000. |
-| `plugin/insn_count.c`         | QEMU TCG plugin: registers `INLINE_ADD_U64` per TB, prints total at exit. |
+| `plugin/insn_count.c`         | Original QEMU TCG executed-instruction counter. |
+| `plugin/m4_cycles.c`          | Per-instruction QEMU instrumentation and timing breakdown. |
+| `plugin/m4_timing.c`/`.h`     | Testable Cortex-M4 mnemonic timing model. |
+| `plugin/test_m4_timing.c`     | Unit coverage for ALU, divide, branch, memory, register-list, and FP timing. |
 | `plugin/qemu-plugin.h`        | Vendored from QEMU 11.0.0 upstream (header-only, GPL-2). |
-| `plugin/Makefile`             | Builds `libinsn_count.so` against the vendored header (uses pkg-config to find glib, which qemu-plugin.h pulls in for `GArray`). |
+| `plugin/Makefile`             | Builds both plugins and the timing-model unit test against the vendored QEMU header. |
 | `Makefile`                    | All build/run targets. |
 | `qemu/`                       | (Optional) QEMU 11.0.0 source clone, used only by `make qemu` on Linux. |
 
@@ -149,7 +172,7 @@ The disassembly is the most useful artifact when comparing two C variants:
 if you see the inner loop spilling to the stack, or the compiler choosing
 `UMULL` over `MUL`, that's where your cycles go.
 
-## How the plugin works
+## How the plugins work
 
 ```c
 sb         = qemu_plugin_scoreboard_new(sizeof(uint64_t));
@@ -172,6 +195,15 @@ memory add — that's why the count target runs at ~2 billion guest
 instructions per second. At process exit, the plugin sums across vcpus
 and prints to stderr.
 
+The cycle plugin instead enumerates the instructions in each TB, obtains their
+Capstone disassembly through QEMU, and applies `m4_timing_for_disas()`. It uses
+per-instruction inline counters so an exception in the middle of a TB does not
+pre-count later instructions. An execution callback on each conditional branch
+records its fall-through PC; a TB-entry callback compares that with the next
+PC, charging the three-cycle refill only when the branch was taken. A nonzero
+`undecoded instructions` result makes
+`make count-cycles` fail rather than silently reverting to one cycle each.
+
 We vendor `qemu-plugin.h` from QEMU 11.0.0 because Ubuntu's `qemu-user`
 package doesn't ship plugin headers. The pre-9.0 inline-add API
 (`qemu_plugin_register_vcpu_tb_exec_inline`) was removed in QEMU 9.0;
@@ -181,11 +213,14 @@ ships v11+.
 
 ## Why bare-metal vs userspace, and why the userspace path uses `-mcpu=cortex-a7`
 
-The **bare-metal path** (`make count`) is the one you should trust: gcc
+The **bare-metal path** (`make count` or `make count-cycles`) is the one to
+use for an M4-specific instruction stream: gcc
 emits Thumb-2 + FPv4-SP instructions targeting Cortex-M4 specifically, the
 linker places the vector table at address 0 with our SP and Reset_Handler,
-and `qemu-system-arm -M mps2-an386` runs a real Cortex-M4 model with FPU.
-This is what an M4 actually executes.
+and `qemu-system-arm -M mps2-an386` models Cortex-M4 architectural execution
+with an FPU. QEMU does not model the core's cycle-by-cycle pipeline or the
+target MCU's memory system; `count-cycles` supplies the separate timing-table
+estimate described above.
 
 The **userspace path** (`make count-linux`) is a convenience for fast
 turnaround. A truly M-profile object can't be linked against glibc startup
